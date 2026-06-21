@@ -82,16 +82,6 @@ export interface PaystackVerificationResponse {
   }
 }
 
-// Supported currencies by Paystack with their subunit conversion
-const PAYSTACK_CURRENCIES = {
-  NGN: { subunit: 100, name: 'Naira', subunit_name: 'kobo' },
-  GHS: { subunit: 100, name: 'Cedi', subunit_name: 'pesewas' },
-  USD: { subunit: 100, name: 'Dollar', subunit_name: 'cents' },
-  ZAR: { subunit: 100, name: 'Rand', subunit_name: 'cents' },
-} as const
-
-type PaystackCurrency = keyof typeof PAYSTACK_CURRENCIES
-
 export class PaystackProvider extends AbstractPaymentProvider<PaystackConfig> {
   static identifier = "paystack"
   protected readonly logger_: Logger
@@ -117,28 +107,11 @@ export class PaystackProvider extends AbstractPaymentProvider<PaystackConfig> {
   }
 
   /**
-   * Convert amount to Paystack's expected subunit based on currency
-   * NGN: kobo (1 Naira = 100 kobo)
-   * GHS: pesewas (1 Cedi = 100 pesewas)
-   * USD/ZAR: cents (1 Dollar/Rand = 100 cents)
+   * Convert amount to Paystack's expected subunit.
+   * Paystack expects all currency values to be multiplied by 100.
    */
-  private convertToSubunit(amount: number, currency: string): number {
-    const upperCurrency = currency?.toUpperCase() as PaystackCurrency
-    const currencyInfo = PAYSTACK_CURRENCIES[upperCurrency]
-    
-    if (!currencyInfo) {
-      this.logger_.warn(`Unsupported currency: ${currency}. Defaulting to NGN conversion.`)
-      return Math.round(amount * 100)
-    }
-    
-    return Math.round(amount * currencyInfo.subunit)
-  }
-
-  /**
-   * Validate if currency is supported by Paystack
-   */
-  private isSupportedCurrency(currency: string): boolean {
-    return Object.keys(PAYSTACK_CURRENCIES).includes(currency?.toUpperCase())
+  private convertToSubunit(amount: number): number {
+    return Math.round(amount * 100)
   }
 
   private async getCartContext(cartId?: string): Promise<any> {
@@ -172,7 +145,6 @@ export class PaystackProvider extends AbstractPaymentProvider<PaystackConfig> {
       sessionId: data?.session_id,
     });
 
-    // Log customer context if available
     if (context?.customer) {
       console.log('[PaystackProvider.initiatePayment] Customer context:', {
         id: context.customer.id,
@@ -184,15 +156,9 @@ export class PaystackProvider extends AbstractPaymentProvider<PaystackConfig> {
 
     try {
       const sessionId = data?.session_id as string;
-      
-      // Get customer email from multiple sources
       let customerEmail = context?.customer?.email || data?.email as string;
-      console.log('[PaystackProvider.initiatePayment] Customer email from context:', customerEmail);
-      console.log('[PaystackProvider.initiatePayment] Data keys available:', Object.keys(data || {}));
-      console.log('[PaystackProvider.initiatePayment] Data contents:', data);
 
       if (!customerEmail) {
-        console.log('[PaystackProvider.initiatePayment] No customer email, returning pending session');
         return {
           id: sessionId || `pending_${Date.now()}`,
           data: {
@@ -206,22 +172,9 @@ export class PaystackProvider extends AbstractPaymentProvider<PaystackConfig> {
         };
       }
 
-      // Validate currency support
       const normalizedCurrency = currency_code?.toUpperCase() || 'NGN'
-      if (!this.isSupportedCurrency(normalizedCurrency)) {
-        throw new Error(`Unsupported currency: ${currency_code}. Supported currencies: ${Object.keys(PAYSTACK_CURRENCIES).join(', ')}`)
-      }
-
-      // Convert amount to appropriate subunit (kobo, pesewas, cents)
-      const amountInSubunit = this.convertToSubunit(amount as number, normalizedCurrency);
+      const amountInSubunit = this.convertToSubunit(amount as number);
       
-      console.log('[PaystackProvider.initiatePayment] Initializing Paystack transaction:', {
-        email: customerEmail,
-        amount: amountInSubunit,
-        currency: normalizedCurrency,
-        reference: sessionId,
-      });
-
       // Use the official Paystack SDK to initialize transaction
       const response = await this.client_.transaction.initialize({
         email: customerEmail,
@@ -234,26 +187,11 @@ export class PaystackProvider extends AbstractPaymentProvider<PaystackConfig> {
         }),
       });
 
-      console.log('[PaystackProvider.initiatePayment] Paystack API response:', {
-        status: response.status,
-        message: response.message,
-        hasData: !!response.data,
-      });
-
       if (!response.status) {
-        console.error('[PaystackProvider.initiatePayment] Paystack initialization failed:', response);
-        throw new Error(`Paystack initialization failed: ${response.message}`);
+        throw new Error(response.message || "Paystack initialization failed.");
       }
 
       const authorizationUrl = (response.data as any)?.authorization_url;
-      
-      console.log('[PaystackProvider.initiatePayment] Paystack transaction initialized:', {
-        reference: (response.data as any)?.reference,
-        access_code: (response.data as any)?.access_code,
-        authorization_url: authorizationUrl,
-      });
-
-      // If we have an authorization URL, the session requires more (user action)
       const sessionStatus = authorizationUrl 
         ? PaymentSessionStatus.REQUIRES_MORE
         : PaymentSessionStatus.PENDING;
@@ -269,24 +207,21 @@ export class PaystackProvider extends AbstractPaymentProvider<PaystackConfig> {
           currency: normalizedCurrency,
           email: customerEmail,
           public_key: this.config_.public_key,
-          // Add timestamp for debugging
           created_at: new Date().toISOString(),
         },
         status: sessionStatus,
       };
-    } catch (error) {
-      console.error('[PaystackProvider.initiatePayment] Error details:', {
-        message: error.message,
-        name: error.name,
-        stack: error.stack,
-        response: error.response?.data,
-      });
+    } catch (error: any) {
+      console.error('[PaystackProvider.initiatePayment] Error details:', error);
       
+      // Extract specific API error details from Paystack SDK if nested inside an HTTP error context
+      const apiErrorMessage = error?.response?.data?.message || error.message || "An unknown error occurred";
+
       return {
         id: data?.session_id as string || `error_${Date.now()}`,
         data: {
           session_id: data?.session_id,
-          error: error.message,
+          error: `Paystack Error: ${apiErrorMessage}`,
           status: "error",
         },
         status: PaymentSessionStatus.ERROR,
@@ -338,7 +273,6 @@ export class PaystackProvider extends AbstractPaymentProvider<PaystackConfig> {
   async capturePayment(
     paymentSessionData: Record<string, unknown>
   ): Promise<any> {
-    // Paystack doesn't have separate capture - payment is captured on authorization
     try {
       const reference = paymentSessionData.reference as string
       
@@ -367,7 +301,6 @@ export class PaystackProvider extends AbstractPaymentProvider<PaystackConfig> {
     input: RefundPaymentInput
   ): Promise<RefundPaymentOutput> {
     try {
-      // Cast input to access the properties we expect
       const refundInput = input as any
       const transactionId = refundInput.transaction_id || refundInput.payment_session_data?.transaction_id
       const amount = refundInput.amount
@@ -376,9 +309,8 @@ export class PaystackProvider extends AbstractPaymentProvider<PaystackConfig> {
         return this.buildError("Transaction ID is required for refund")
       }
 
-      // Use the official Paystack SDK to create refund
       const refundCurrency = refundInput.currency || 'NGN'
-      const refundAmountSubunit = this.convertToSubunit(Number(amount), refundCurrency)
+      const refundAmountSubunit = this.convertToSubunit(Number(amount))
       
       const response = await this.client_.refund.create({
         transaction: transactionId,
@@ -408,7 +340,6 @@ export class PaystackProvider extends AbstractPaymentProvider<PaystackConfig> {
   async cancelPayment(
     paymentSessionData: Record<string, unknown>
   ): Promise<any> {
-    // Paystack doesn't have explicit cancel - we just mark as cancelled
     return {
       ...paymentSessionData,
       cancelled_at: new Date().toISOString(),
@@ -452,29 +383,10 @@ export class PaystackProvider extends AbstractPaymentProvider<PaystackConfig> {
     amount,
     context,
   }: UpdatePaymentInput): Promise<UpdatePaymentOutput> {
-    console.log('[PaystackProvider.updatePayment] Called with:', {
-      amount: amount?.toString(),
-      currency_code,
-      contextKeys: Object.keys(context || {}),
-      dataKeys: Object.keys(data || {}),
-    });
-
-    // Log customer context if available
-    if (context?.customer) {
-      console.log('[PaystackProvider.updatePayment] Customer context:', {
-        id: context.customer.id,
-        email: context.customer.email,
-        first_name: context.customer.first_name,
-      });
-    }
-
     try {
-      // Get customer email from context (same as initiatePayment)
       const customerEmail = context?.customer?.email;
-      console.log('[PaystackProvider.updatePayment] Customer email from context:', customerEmail);
 
       if (!customerEmail) {
-        console.log('[PaystackProvider.updatePayment] No customer email, keeping pending session');
         return {
           data: {
             ...data,
@@ -486,7 +398,6 @@ export class PaystackProvider extends AbstractPaymentProvider<PaystackConfig> {
         };
       }
 
-      // Check if we need to re-initialize the session
       const shouldReinitialize = 
         data?.status === "pending" || 
         !data?.authorization_url || 
@@ -494,14 +405,6 @@ export class PaystackProvider extends AbstractPaymentProvider<PaystackConfig> {
         data?.session_expired === true;
 
       if (shouldReinitialize) {
-        console.log('[PaystackProvider.updatePayment] Re-initializing with Paystack due to:', {
-          isPending: data?.status === "pending",
-          noAuthUrl: !data?.authorization_url,
-          paymentCompleted: data?.payment_completed,
-          sessionExpired: data?.session_expired,
-        });
-        
-        // Create a fresh session by removing old session data
         const freshData = {
           session_id: data?.session_id,
           email: customerEmail,
@@ -514,19 +417,11 @@ export class PaystackProvider extends AbstractPaymentProvider<PaystackConfig> {
           context,
         });
       }
-
-      // Otherwise, just return the existing data (no update needed for Paystack)
-      console.log('[PaystackProvider.updatePayment] Returning existing session data');
-      console.log('[PaystackProvider.updatePayment] Current data status:', data?.status);
-      console.log('[PaystackProvider.updatePayment] Current data keys:', Object.keys(data || {}));
       
-      // Ensure we always have a valid status
       const currentStatus = data?.status as PaymentSessionStatus;
       const validStatus = currentStatus && Object.values(PaymentSessionStatus).includes(currentStatus) 
         ? currentStatus 
         : PaymentSessionStatus.PENDING;
-      
-      console.log('[PaystackProvider.updatePayment] Using status:', validStatus);
       
       return {
         data: {
@@ -535,13 +430,14 @@ export class PaystackProvider extends AbstractPaymentProvider<PaystackConfig> {
         },
         status: validStatus,
       };
-    } catch (error) {
+    } catch (error: any) {
       console.error('[PaystackProvider.updatePayment] Error:', error);
+      const apiErrorMessage = error?.response?.data?.message || error.message || "An error occurred during payment update";
       
       return {
         data: {
           ...data,
-          error: error.message,
+          error: `Paystack Error: ${apiErrorMessage}`,
           status: "error",
         },
         status: PaymentSessionStatus.ERROR,
@@ -552,8 +448,6 @@ export class PaystackProvider extends AbstractPaymentProvider<PaystackConfig> {
   async deletePayment(
     paymentSessionData: Record<string, unknown>
   ): Promise<any> {
-    // Paystack doesn't support deleting transactions
-    // We just return the session data as is
     return paymentSessionData
   }
 
@@ -606,7 +500,6 @@ export class PaystackProvider extends AbstractPaymentProvider<PaystackConfig> {
     }
   ): Promise<any> {
     try {
-      // Parse the webhook data
       const webhookData = typeof data.rawData === 'string' 
         ? JSON.parse(data.rawData) 
         : JSON.parse(data.rawData.toString())
@@ -644,7 +537,6 @@ export class PaystackProvider extends AbstractPaymentProvider<PaystackConfig> {
   }
 
   private async verifyTransaction(reference: string): Promise<PaystackVerificationResponse> {
-    // Use the official Paystack SDK to verify transaction
     const response = await this.client_.transaction.verify({ reference })
     return response as PaystackVerificationResponse
   }
