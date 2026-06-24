@@ -353,12 +353,7 @@ The plugin provides these endpoints:
 
 ## 💰 Supported Currencies
 
-| Currency | Code | Subunit | Example |
-|----------|------|---------|---------|
-| Nigerian Naira | NGN | kobo | ₦100.00 |
-| US Dollar | USD | cents | $1.00 |
-| Ghanaian Cedi | GHS | pesewas | GH₵1.00 |
-| South African Rand | ZAR | cents | R1.00 |
+Check paystack documentation for supported currencies.
 
 ## 🔍 Testing
 
